@@ -1,0 +1,13 @@
+services:
+  tunnel:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-443}:8443/tcp"
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    volumes:
+      - tunnel-data:/data
+
+volumes:
+  tunnel-data:

@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -24,6 +25,7 @@ import (
 const (
 	protoVersion = 1
 	kindTCP      = 1
+	kindUDP      = 2 // addr is empty; stream carries frames: [len:2][ATYP addr port][payload]
 
 	statusOK   = 0
 	statusFail = 1
@@ -96,4 +98,27 @@ func pipe(a, b net.Conn) {
 	wg.Wait()
 	a.Close()
 	b.Close()
+}
+
+// writeFrame sends one UDP datagram over a stream as [len:2][body], in a
+// single Write so concurrent writers can't interleave.
+func writeFrame(w io.Writer, body []byte) error {
+	if len(body) > 0xffff {
+		return errors.New("frame too large")
+	}
+	buf := make([]byte, 2+len(body))
+	binary.BigEndian.PutUint16(buf, uint16(len(body)))
+	copy(buf[2:], body)
+	_, err := w.Write(buf)
+	return err
+}
+
+func readFrame(r io.Reader) ([]byte, error) {
+	var l [2]byte
+	if _, err := io.ReadFull(r, l[:]); err != nil {
+		return nil, err
+	}
+	body := make([]byte, binary.BigEndian.Uint16(l[:]))
+	_, err := io.ReadFull(r, body)
+	return body, err
 }

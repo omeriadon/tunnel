@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -121,6 +122,12 @@ func handleStream(st net.Conn) {
 			return
 		}
 		pipe(st, target)
+	case kindUDP:
+		if _, err := st.Write([]byte{statusOK}); err != nil {
+			st.Close()
+			return
+		}
+		relayUDP(st)
 	default:
 		st.Write([]byte{statusFail})
 		st.Close()
@@ -158,4 +165,57 @@ func ensureSelfSigned(certFile, keyFile string) error {
 	}
 	log.Printf("generated self-signed cert %s", certFile)
 	return os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}), 0o600)
+}
+
+// relayUDP serves one UDP association: frames from the stream are sent from a
+// fresh UDP socket, and anything that comes back is framed to the client.
+func relayUDP(st net.Conn) {
+	uc, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		st.Close()
+		return
+	}
+	const idle = 5 * time.Minute
+	stop := func() { uc.Close(); st.Close() }
+	defer stop()
+
+	go func() {
+		defer stop()
+		buf := make([]byte, 65535)
+		for {
+			uc.SetReadDeadline(time.Now().Add(idle))
+			n, from, err := uc.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if writeFrame(st, append(appendSocksAddr(nil, from), buf[:n]...)) != nil {
+				return
+			}
+		}
+	}()
+
+	cache := map[string]*net.UDPAddr{}
+	for {
+		st.SetReadDeadline(time.Now().Add(idle))
+		body, err := readFrame(st)
+		if err != nil {
+			return
+		}
+		r := bytes.NewReader(body)
+		addr, err := readSocksAddr(r)
+		if err != nil {
+			continue
+		}
+		dst, ok := cache[addr]
+		if !ok {
+			if dst, err = net.ResolveUDPAddr("udp", addr); err != nil {
+				continue
+			}
+			if len(cache) > 1024 {
+				clear(cache)
+			}
+			cache[addr] = dst
+		}
+		uc.WriteToUDP(body[len(body)-r.Len():], dst)
+	}
 }
